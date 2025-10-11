@@ -34,7 +34,7 @@ def generate_matrix(d, block_size, mode, lam=1, range=None, schur=False):
     J = lam * np.eye(d) + np.diag([1] * block_size + [0] * (d - block_size - 1), k=1)
     if range is None:
         match mode:
-            case "random" | "upper" | "ortho":
+            case "random" | "upper" | "ortho" | "lower":
                 range = 1
             case "int":
                 range = 100
@@ -50,6 +50,8 @@ def generate_matrix(d, block_size, mode, lam=1, range=None, schur=False):
                     S = np.random.randint(0, range, size=(d, d))
                 case "upper":
                     S = np.triu(np.random.rand(d, d)) * range
+                case "lower":
+                    S = np.tril(np.random.rand(d, d)) * range
                 case "ortho":
                     A = np.random.rand(d, d)
                     Q, _ = np.linalg.qr(A)
