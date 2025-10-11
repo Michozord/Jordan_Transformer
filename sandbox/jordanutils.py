@@ -25,12 +25,12 @@ class LabelsManager:
             for block_size in block_sizes:
                 sizes[block_size] = num
         return sizes
-    
+
 
 rng = np.random.default_rng(seed=123)
 
 
-def generate_matrix(d, block_size, mode, lam=1, range=None):
+def generate_matrix(d, block_size, mode, lam=1, range=None, schur=False):
     J = lam * np.eye(d) + np.diag([1] * block_size + [0] * (d - block_size - 1), k=1)
     if range is None:
         match mode:
@@ -51,7 +51,7 @@ def generate_matrix(d, block_size, mode, lam=1, range=None):
                 case "upper":
                     S = np.triu(np.random.rand(d, d)) * range
                 case "ortho":
-                    A = np.random.rand(d,d)
+                    A = np.random.rand(d, d)
                     Q, _ = np.linalg.qr(A)
                     S = Q
             if abs(np.linalg.cond(S)) < 1e5:
@@ -59,12 +59,14 @@ def generate_matrix(d, block_size, mode, lam=1, range=None):
 
     S = generate_S()
     X = S @ J @ np.linalg.inv(S)
-    return X / np.linalg.norm(X, ord="fro")
+    # X = X / np.linalg.norm(X, ord="fro")
+    if schur:
+        return scipy.linalg.schur(X)[0]
+    else:
+        return X
 
 
-def generate_testset(
-    d, labels: LabelsManager, mode="random"
-):
+def generate_testset(d, labels: LabelsManager, mode="random", schur=False):
     dataset_sizes = labels.get_dataset_sizes()
     X = np.ndarray(shape=(sum(dataset_sizes.values()), d, d))
     y = []
@@ -73,10 +75,10 @@ def generate_testset(
     for label in labels.block_sizes_by_label.keys():
         for block_size in labels.block_sizes_by_label[label]:
             for _ in range(dataset_sizes[block_size]):
-                X[idx] = generate_matrix(d, block_size, mode)
+                X[idx] = generate_matrix(d, block_size, mode, schur)
                 idx += 1
                 y.append(label)
- 
+
     return X, y
 
 
