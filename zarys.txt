@@ -1,0 +1,5 @@
+1. Wprowadzenie 
+2. Podstawowe definicje nt. Macierzy Jordana i NN
+3. Kilka rzeczy z Demmela, które będą potrzebne w 4. 
+4. Eksperymenty korzystające z NN 
+5. Podsumowanie 
