@@ -27,11 +27,10 @@ class LabelsManager:
         return sizes
 
 
-rng = np.random.default_rng(seed=123)
-
-
-def generate_matrix(d, block_size, mode, lam=1, range=None, schur=False):
+def generate_matrix(d, block_size, mode, eps=None, lam=1, range=None, schur=False):
     J = lam * np.eye(d) + np.diag([1] * block_size + [0] * (d - block_size - 1), k=1)
+    if eps is not None:
+        J += eps * np.random.rand(d, d)
     if range is None:
         match mode:
             case "random" | "upper" | "ortho" | "lower":
@@ -68,7 +67,7 @@ def generate_matrix(d, block_size, mode, lam=1, range=None, schur=False):
         return X
 
 
-def generate_testset(d, labels: LabelsManager, mode="random", schur=False):
+def generate_testset(d, labels: LabelsManager, mode="random", eps=None, schur=False):
     dataset_sizes = labels.get_dataset_sizes()
     X = np.ndarray(shape=(sum(dataset_sizes.values()), d, d))
     y = []
@@ -77,7 +76,7 @@ def generate_testset(d, labels: LabelsManager, mode="random", schur=False):
     for label in labels.block_sizes_by_label.keys():
         for block_size in labels.block_sizes_by_label[label]:
             for _ in range(dataset_sizes[block_size]):
-                X[idx] = generate_matrix(d, block_size, mode, schur)
+                X[idx] = generate_matrix(d, block_size, mode, eps=eps, schur=schur)
                 idx += 1
                 y.append(label)
 

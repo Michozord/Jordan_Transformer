@@ -30,7 +30,7 @@ class SimpleNN(nn.Module):
 
 # ---- Training + Evaluation function ----
 def train_and_test_model(
-    train_mode, test_mode, verbose=1, epochs=50, width=256, depth=5
+    train_mode, test_mode, eps=None, verbose=1, epochs=50, width=256, depth=5
 ):
     # --- Device selection logic ---
     try:
@@ -53,7 +53,7 @@ def train_and_test_model(
     d = 5
     dataset_size = 50000
     manager = LabelsManager([0], [1], [2], [3], [4], dataset_size=dataset_size)
-    X, y = generate_testset(d, manager, mode=train_mode)
+    X, y = generate_testset(d, manager, mode=train_mode, eps=eps)
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=21
     )
@@ -135,7 +135,7 @@ def train_and_test_model(
 
     # --- Testing ---
     manager.dataset_size = 1000
-    X_test, y_test = generate_testset(d, manager, mode=test_mode)
+    X_test, y_test = generate_testset(d, manager, mode=test_mode, eps=eps)
     X_test = torch.tensor(X_test, dtype=torch.float32).to(device)
 
     model.eval()
