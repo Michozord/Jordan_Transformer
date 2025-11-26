@@ -1,4 +1,4 @@
-from jordanutils import LabelsManager, generate_testset
+from jordanutils import generate_testset
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,6 +20,7 @@ class SimpleNN(nn.Module):
             nn.ReLU(),
             *([nn.Linear(width, width), nn.ReLU()] * depth),
             nn.Linear(width, d),
+            nn.Softmax(),
         )
 
     def forward(self, x):
@@ -27,11 +28,7 @@ class SimpleNN(nn.Module):
         x = self.layers(x)
         return x
 
-
-# ---- Training + Evaluation function ----
-def train_and_test_model(
-    train_mode, test_mode, eps=None, verbose=1, epochs=50, width=256, depth=5
-):
+def setup_device():
     # --- Device selection logic ---
     try:
         import torch_directml
@@ -46,17 +43,33 @@ def train_and_test_model(
             device = torch.device("cpu")
             backend = "cpu"
 
-    if verbose:
-        print(f"Using device: {device} (backend: {backend})")
+    print(f"Using device: {device} (backend: {backend})")
+    return device
 
-    # --- Dataset setup ---
-    d = 5
-    dataset_size = 50000
-    manager = LabelsManager([0], [1], [2], [3], [4], dataset_size=dataset_size)
-    X, y = generate_testset(d, manager, mode=train_mode, eps=eps)
+
+def _evaluate_model(model, data_loader, device):
+    """Calculates accuracy on a given DataLoader."""
+    correct, total = 0, 0
+    with torch.no_grad():
+        for xb, yb in data_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            preds = model(xb)
+            pred_labels = preds.argmax(1)
+            correct += (pred_labels == yb).sum().item()
+            total += yb.size(0)
+    return correct / total
+
+
+def train_model(
+    X, y, device, verbose=1, epochs=50, width=256, depth=5
+):
+
+
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=21
     )
+    
+    d = X_train[0].shape[0]
 
     # --- Convert to tensors ---
     X_train = torch.tensor(X_train, dtype=torch.float32)
@@ -67,17 +80,18 @@ def train_and_test_model(
     # --- DataLoaders ---
     train_dataset = TensorDataset(X_train, y_train)
     val_dataset = TensorDataset(X_val, y_val)
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
 
     # --- Model, Loss, Optimizer ---
     model = SimpleNN(d, width, depth).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)    #, weight_decay=1e-4)
+    # scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
 
     # --- Early Stopping setup ---
     best_val_acc = 0.0
-    patience = 3
+    patience = 7
     counter = 0
     best_weights = None
 
@@ -91,33 +105,18 @@ def train_and_test_model(
             loss = criterion(preds, yb)
             loss.backward()
             optimizer.step()
+            # scheduler.step()
         
-        correct, total = 0, 0
-        with torch.no_grad():
-            for xb, yb in train_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                preds = model(xb)
-                pred_labels = preds.argmax(1)
-                correct += (pred_labels == yb).sum().item()
-                total += yb.size(0)
-        train_acc = correct / total
-
-        # --- Validation Loop ---
+        train_acc = _evaluate_model(model, train_loader, device)
         model.eval()
-        correct, total = 0, 0
-        with torch.no_grad():
-            for xb, yb in val_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                preds = model(xb)
-                pred_labels = preds.argmax(1)
-                correct += (pred_labels == yb).sum().item()
-                total += yb.size(0)
-        val_acc = correct / total
+        val_acc = _evaluate_model(model, val_loader, device)
 
         if verbose:
             print(f"Epoch {epoch+1:02d} - Loss: {loss:.4f} - Train Acc: {train_acc:.4f} - Val Acc: {val_acc:.4f}")
 
         # --- Early Stopping ---
+        if epoch <= 5:
+            continue
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             counter = 0
@@ -132,15 +131,16 @@ def train_and_test_model(
     # --- Restore best model ---
     if best_weights is not None:
         model.load_state_dict(best_weights)
+    
+    return model
 
+def test_model(model, device, X):
     # --- Testing ---
-    manager.dataset_size = 1000
-    X_test, y_test = generate_testset(d, manager, mode=test_mode, eps=eps)
-    X_test = torch.tensor(X_test, dtype=torch.float32).to(device)
+    X = torch.tensor(X, dtype=torch.float32).to(device)
 
     model.eval()
     with torch.no_grad():
-        outputs = model(X_test)
+        outputs = model(X)
         y_predicted = torch.argmax(outputs, dim=1).cpu().numpy()
 
-    return y_test, y_predicted
+    return y_predicted

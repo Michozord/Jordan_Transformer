@@ -27,16 +27,21 @@ class LabelsManager:
         return sizes
 
 
-def generate_matrix(d, block_size, mode, eps=None, lam=1, range=None, schur=False):
-    J = lam * np.eye(d) + np.diag([1] * block_size + [0] * (d - block_size - 1), k=1)
+def generate_matrix(d, block_size, mode, eps=None, lam=1, value_range=None, schur=False):
+    indexes = np.random.choice(d-1, size=block_size, replace=False)
+    # indexes = list(range(block_size))
+    super_diag = np.zeros(d-1)
+    for index in indexes:
+        super_diag[index] = 1
+    J = lam * np.eye(d) + np.diag(super_diag, k=1)
     if eps is not None:
         J += eps * np.random.rand(d, d)
-    if range is None:
+    if value_range is None:
         match mode:
             case "random" | "upper" | "ortho" | "lower":
-                range = 1
+                value_range = 1
             case "int":
-                range = 100
+                value_range = 100
             case _:
                 raise RuntimeError(f"Mode {mode} is not supported")
 
@@ -44,13 +49,13 @@ def generate_matrix(d, block_size, mode, eps=None, lam=1, range=None, schur=Fals
         while True:
             match mode:
                 case "random":
-                    S = np.random.rand(d, d) * range
+                    S = np.random.rand(d, d) * value_range
                 case "int":
-                    S = np.random.randint(0, range, size=(d, d))
+                    S = np.random.randint(0, value_range, size=(d, d))
                 case "upper":
-                    S = np.triu(np.random.rand(d, d)) * range
+                    S = np.triu(np.random.rand(d, d)) * value_range
                 case "lower":
-                    S = np.tril(np.random.rand(d, d)) * range
+                    S = np.tril(np.random.rand(d, d)) * value_range
                 case "ortho":
                     A = np.random.rand(d, d)
                     Q, _ = np.linalg.qr(A)
@@ -67,18 +72,16 @@ def generate_matrix(d, block_size, mode, eps=None, lam=1, range=None, schur=Fals
         return X
 
 
-def generate_testset(d, labels: LabelsManager, mode="random", eps=None, schur=False):
-    dataset_sizes = labels.get_dataset_sizes()
-    X = np.ndarray(shape=(sum(dataset_sizes.values()), d, d))
+def generate_testset(d, size_per_class, mode="random", eps=None, schur=False):
+    X = np.ndarray(shape=(size_per_class * d, d, d))
     y = []
 
     idx = 0
-    for label in labels.block_sizes_by_label.keys():
-        for block_size in labels.block_sizes_by_label[label]:
-            for _ in range(dataset_sizes[block_size]):
-                X[idx] = generate_matrix(d, block_size, mode, eps=eps, schur=schur)
-                idx += 1
-                y.append(label)
+    for label in range(d):
+        for _ in range(size_per_class):
+            X[idx] = generate_matrix(d, label, mode, eps=eps, schur=schur)
+            idx += 1
+            y.append(label)
 
     return X, y
 
