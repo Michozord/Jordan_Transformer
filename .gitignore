@@ -10,3 +10,5 @@ __pycache__/
 .idea/
 .vscode/
 *.sqlite3
+*-ubyte
+*.gz
