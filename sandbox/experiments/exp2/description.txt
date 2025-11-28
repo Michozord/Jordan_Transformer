@@ -7,3 +7,5 @@ Adam lr = 1e-3
 kategoria: 
 oznacza liczbę 1 nad przekątną w bloku Jordana. Nad przekątną mogą być dowolne permutacje 0 i 1. Zasadniczo to odpowiada na pytanie o wielokrotność geometryczną wartości własnej
 
+Ten eksperyment poszedł do pracy magisterskiej - 26.11.2025
+
