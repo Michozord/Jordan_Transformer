@@ -45,7 +45,7 @@ def generate_matrix(d, block_size, mode, eps=None, lam=1, value_range=None, schu
         super_diag[index] = 1
     J = lam * np.eye(d) + np.diag(super_diag, k=1)
     if eps is not None:
-        J += eps * np.random.rand(d, d)
+        J += eps * np.random.randn(d, d)
     if value_range is None:
         match mode:
             case "random" | "upper" | "ortho" | "lower":
@@ -59,15 +59,15 @@ def generate_matrix(d, block_size, mode, eps=None, lam=1, value_range=None, schu
         while True:
             match mode:
                 case "random":
-                    S = np.random.rand(d, d) * value_range
+                    S = np.random.randn(d, d) * value_range
                 case "int":
                     S = np.random.randint(0, value_range, size=(d, d))
                 case "upper":
-                    S = np.triu(np.random.rand(d, d)) * value_range
+                    S = np.triu(np.random.randn(d, d)) * value_range
                 case "lower":
-                    S = np.tril(np.random.rand(d, d)) * value_range
+                    S = np.tril(np.random.randn(d, d)) * value_range
                 case "ortho":
-                    A = np.random.rand(d, d)
+                    A = np.random.randn(d, d)
                     Q, _ = np.linalg.qr(A)
                     S = Q
             if abs(np.linalg.cond(S)) < 1e5:
