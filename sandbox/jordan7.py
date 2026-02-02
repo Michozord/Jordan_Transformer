@@ -156,12 +156,15 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
 
 
 
-def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None, return_J=False):
-    super_diag = get_superdiagonal(max_block_size, d)
-    J = np.diag(super_diag, k=1)
+def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None, return_J=False, numpy_float32=False):
+    # dtype selection
+    dtype = np.float32 if numpy_float32 else np.float64
+
+    super_diag = get_superdiagonal(max_block_size, d).astype(dtype)
+    J = np.diag(super_diag, k=1).astype(dtype)
     
     if eps is not None:
-        J += eps * np.random.randn(d, d)
+        J = J + (eps * np.random.randn(d, d)).astype(dtype)
 
     if value_range is None:
         match mode:
@@ -176,25 +179,28 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
         while True:
             match mode:
                 case "random":
-                    S = np.random.randn(d, d) * value_range
+                    S = (np.random.randn(d, d) * value_range).astype(dtype)
                 case "int":
-                    S = np.random.randint(0, value_range, size=(d, d))
+                    S = np.random.randint(0, value_range, size=(d, d)).astype(dtype)
                 case "upper":
-                    S = np.triu(np.random.randn(d, d)) * value_range
+                    S = np.triu(np.random.randn(d, d)).astype(dtype) * value_range
                 case "lower":
-                    S = np.tril(np.random.randn(d, d)) * value_range
+                    S = np.tril(np.random.randn(d, d)).astype(dtype) * value_range
                 case "ortho":
-                    A = np.random.randn(d, d)
+                    A = np.random.randn(d, d).astype(dtype)
                     Q, _ = np.linalg.qr(A)
-                    S = Q
+                    S = Q.astype(dtype)
             if abs(np.linalg.cond(S)) < 1e5:
                 return S
 
     S = generate_S()
     if return_J:
-        return J, S
+        return J.astype(dtype), S.astype(dtype)
     
-    X = S @ J @ np.linalg.inv(S)
+    # ensure all operands are same dtype
+    S = S.astype(dtype)
+    J = J.astype(dtype)
+    X = S @ J @ np.linalg.inv(S.astype(dtype))
 
     # if eps is not None:
     #     X += eps * np.random.randn(d, d)
@@ -220,7 +226,7 @@ def per_power_features(X):
     return np.stack(feat_per_k), mask  # (d-1, d*d), (d-1,)
 
 
-def generate_training_dataset(matrices_per_class, d=5, mode="random", eps_range=(1e-16, 1e-2), eps=None, no_eps_rate=0.1, device="cpu"):
+def generate_training_dataset(matrices_per_class, d=5, mode="random", eps_range=(1e-16, 1e-2), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False):
 
     matrices = []
     labels = []
@@ -241,7 +247,7 @@ def generate_training_dataset(matrices_per_class, d=5, mode="random", eps_range=
             else:
                 eps_l = eps
             # 1. Generate matrix X
-            X = generate_matrix(d, max_block_size, mode=mode, eps=eps_l)  # (d, d)
+            X = generate_matrix(d, max_block_size, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
             matrices.append(X)
             labels.append(class_idx)
 
@@ -314,6 +320,8 @@ def train_jordan_net(
     best_val_loss = float("inf")
     epochs_no_improve = 0
 
+    model.load_state_dict(torch.load(f"sandbox/model_jordan7_{d}.pth"))
+
     for epoch in range(num_epochs):
 
         # ===== TRAIN =====
@@ -362,7 +370,7 @@ def train_jordan_net(
         )
 
         # ===== EARLY STOPPING =====
-        if epoch > 4:
+        if True: #epoch > 4:
             if val_loss < best_val_loss - 1e-6:  # small tolerance
                 best_val_loss = val_loss
                 epochs_no_improve = 0
