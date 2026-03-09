@@ -154,7 +154,7 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
     k = torch.arange(1, d+1, device=device_target, dtype=torch.float32)  # (d,)
 
     # eps == 0 → one-hot
-    if float(eps) <= 1e-8:
+    if float(eps) <= eps0:
         idx = (y.long() - 1).clamp(min=0, max=d-1)  # (1,)
         out = torch.zeros(d, device=device_target)
         out[idx] = 1.0
@@ -228,7 +228,7 @@ def per_power_features(X):
     N_k = X.copy()
     r = np.linalg.matrix_rank(X)
     mask = np.ones(d - 1, dtype=bool)
-    mask[:r] = 0.0
+    mask[:r+1] = 0.0 # TODO: Probably a mistake: it should be r+1. 
     if np.all(mask):
         mask[0] = 0.0  # Ensure at least one valid power
 
