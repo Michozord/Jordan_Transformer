@@ -88,7 +88,7 @@ class JordanClassifier(nn.Module):
     
 
 class JordanTransformer(nn.Module):
-    def __init__(self, dim, num_layers=4, num_heads=8):
+    def __init__(self, dim, num_layers=2, num_heads=4):
         super().__init__()
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=dim,
@@ -103,7 +103,7 @@ class JordanTransformer(nn.Module):
     
 
 class JordanNet(nn.Module):
-    def __init__(self, encode_dim=32, num_heads=8):
+    def __init__(self, encode_dim=32, num_heads=4):
         super().__init__()
         self.encode_dim = encode_dim
 
@@ -111,8 +111,8 @@ class JordanNet(nn.Module):
 
         self.encoders = nn.ModuleDict()
         self.classifiers = nn.ModuleDict()
-        self.transformer = JordanTransformer(encode_dim, num_layers=4, num_heads=num_heads)
-        self.norm = nn.LayerNorm(encode_dim)
+        self.transformer = JordanTransformer(encode_dim, num_layers=2, num_heads=num_heads)
+        # self.norm = nn.LayerNorm(encode_dim)
 
     def add_dimension(self, d):
         if d in self.supported_dimensions:
@@ -124,7 +124,7 @@ class JordanNet(nn.Module):
     def forward(self, d, features, masks=None):
         # features: (B, d-1, d*d)
         Z = self.encoders[str(d)](features)        # (B, d-1, 32)
-        Z = self.norm(Z)                           # Apply LayerNorm here
+        # Z = self.norm(Z)                           # Apply LayerNorm here
         Z = self.transformer(Z, masks=masks)       # (B, d-1, 32)
         
         if masks is not None:
@@ -381,7 +381,7 @@ def train_jordan_net(
 
         # ===== EARLY STOPPING =====
         if True:
-            if val_loss < best_val_loss - 1e-6:  # small tolerance
+            if val_loss < best_val_loss - 1e-4:  # small tolerance
                 best_val_loss = val_loss
                 epochs_no_improve = 0
                 torch.save(model.state_dict(), filename)
