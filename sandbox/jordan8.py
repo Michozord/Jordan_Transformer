@@ -88,7 +88,7 @@ class JordanClassifier(nn.Module):
     
 
 class JordanTransformer(nn.Module):
-    def __init__(self, dim, num_layers=2, num_heads=4):
+    def __init__(self, dim, num_layers=4, num_heads=8):
         super().__init__()
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=dim,
@@ -103,7 +103,7 @@ class JordanTransformer(nn.Module):
     
 
 class JordanNet(nn.Module):
-    def __init__(self, encode_dim=32, num_heads=4):
+    def __init__(self, encode_dim=32, num_heads=8):
         super().__init__()
         self.encode_dim = encode_dim
 
@@ -111,7 +111,8 @@ class JordanNet(nn.Module):
 
         self.encoders = nn.ModuleDict()
         self.classifiers = nn.ModuleDict()
-        self.transformer = JordanTransformer(encode_dim, num_layers=2, num_heads=num_heads)
+        self.transformer = JordanTransformer(encode_dim, num_layers=4, num_heads=num_heads)
+        self.norm = nn.LayerNorm(encode_dim)
 
     def add_dimension(self, d):
         if d in self.supported_dimensions:
@@ -123,59 +124,46 @@ class JordanNet(nn.Module):
     def forward(self, d, features, masks=None):
         # features: (B, d-1, d*d)
         Z = self.encoders[str(d)](features)        # (B, d-1, 32)
-        Z = self.transformer(Z, masks=masks)    # (B, d-1, 32)
+        Z = self.norm(Z)                           # Apply LayerNorm here
+        Z = self.transformer(Z, masks=masks)       # (B, d-1, 32)
+        
         if masks is not None:
-            Z = Z.masked_fill(masks.unsqueeze(-1), 0.0)
-        h = Z.mean(dim=1)               # (B, 32)
+            Z = Z.masked_fill(masks.unsqueeze(-1).bool(), 0.0)
+        h = Z.mean(dim=1)                          # (B, 32)
 
-        logits = self.classifiers[str(d)](h)      # raw scores
-
+        logits = self.classifiers[str(d)](h)       # raw scores
         return logits 
 
 def kl_loss(logits, target_dist):
-    """
-    logits: (B, C)
-    target_dist: (B, C), sums to 1
-    """
     log_probs = torch.log_softmax(logits, dim=-1)
     return torch.nn.functional.kl_div(
         log_probs, target_dist, reduction="batchmean"
     )
 
 def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
-    # make y a scalar tensor
     if not torch.is_tensor(y):
         y = torch.tensor(y, device=device_target)
     else:
         y = y.to(device_target)
-    y = y.float().view(1)   # shape (1,)
+    y = y.float().view(1)
+    k = torch.arange(1, d+1, device=device_target, dtype=torch.float32)
 
-    # class grid
-    k = torch.arange(1, d+1, device=device_target, dtype=torch.float32)  # (d,)
-
-    # eps == 0 → one-hot
     if float(eps) <= eps0:
-        idx = (y.long() - 1).clamp(min=0, max=d-1)  # (1,)
+        idx = (y.long() - 1).clamp(min=0, max=d-1)
         out = torch.zeros(d, device=device_target)
         out[idx] = 1.0
-        return out  # (d,)
+        return out
 
-    # temperature
     tau = c * torch.log1p(
         torch.tensor(eps, dtype=torch.float32, device=device_target) /
         torch.tensor(eps0, dtype=torch.float32, device=device_target)
     )
 
-    # Gaussian kernel over class index
-    logits = -(k - y)**2 / (2 * tau**2)   # (d,)
-    return torch.softmax(logits, dim=-1)  # (d,)
-
-
+    logits = -(k - y)**2 / (2 * tau**2)
+    return torch.softmax(logits, dim=-1)
 
 def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None, return_J=False, numpy_float32=False):
-    # dtype selection
     dtype = np.float32 if numpy_float32 else np.float64
-
     super_diag = get_superdiagonal(max_block_size, d).astype(dtype)
     J = np.diag(super_diag, k=1).astype(dtype)
     
@@ -184,24 +172,17 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
 
     if value_range is None:
         match mode:
-            case "random" | "upper" | "ortho" | "lower":
-                value_range = 1
-            case "int":
-                value_range = 100
-            case _:
-                raise RuntimeError(f"Mode {mode} is not supported")
+            case "random" | "upper" | "ortho" | "lower": value_range = 1
+            case "int": value_range = 100
+            case _: raise RuntimeError(f"Mode {mode} is not supported")
 
     def generate_S():
         while True:
             match mode:
-                case "random":
-                    S = (np.random.randn(d, d) * value_range).astype(dtype)
-                case "int":
-                    S = np.random.randint(0, value_range, size=(d, d)).astype(dtype)
-                case "upper":
-                    S = np.triu(np.random.randn(d, d)).astype(dtype) * value_range
-                case "lower":
-                    S = np.tril(np.random.randn(d, d)).astype(dtype) * value_range
+                case "random": S = (np.random.randn(d, d) * value_range).astype(dtype)
+                case "int": S = np.random.randint(0, value_range, size=(d, d)).astype(dtype)
+                case "upper": S = np.triu(np.random.randn(d, d)).astype(dtype) * value_range
+                case "lower": S = np.tril(np.random.randn(d, d)).astype(dtype) * value_range
                 case "ortho":
                     A = np.random.randn(d, d).astype(dtype)
                     Q, _ = np.linalg.qr(A)
@@ -213,67 +194,48 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     if return_J:
         return J.astype(dtype), S.astype(dtype)
     
-    # ensure all operands are same dtype
     S = S.astype(dtype)
     J = J.astype(dtype)
     X = S @ J @ np.linalg.inv(S.astype(dtype))
-        
     return X
 
 
 def per_power_features(X):
     d = X.shape[0]
-
     feat_per_k = []
     N_k = X.copy()
     r = np.linalg.matrix_rank(X)
     mask = np.ones(d - 1, dtype=bool)
-    mask[:r+1] = 0.0 # TODO: Probably a mistake: it should be r+1. 
+    mask[:r+1] = 0.0
     if np.all(mask):
-        mask[0] = 0.0  # Ensure at least one valid power
+        mask[0] = 0.0
 
     for k in range(1, d):
         feat_per_k.append(N_k.flatten())
-        N_k = N_k @ X  # Next power
+        N_k = N_k @ X
     
-    return np.stack(feat_per_k), mask  # (d-1, d*d), (d-1,)
+    return np.stack(feat_per_k), mask
 
 
 def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, 1e-2), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False):
     dataset = {}
-
     for d in dimensions:
-        matrices = []
-        labels = []
-        features_list = []
-        masks_list = []
-        dists_list = []
-
+        matrices, labels, features_list, masks_list, dists_list = [], [], [], [], []
         for max_block_size in range(1, d+1):
             print(f"Generating class with d={d}, max_block_size={max_block_size}...", end="", flush=True)
             class_idx = max_block_size - 1
-
             for _ in range(matrices_per_class):
                 if eps is None:
-                    if np.random.uniform(0, 1) < no_eps_rate:
-                        eps_l = 0.0
-                    else:
-                        eps_l = np.exp(np.random.uniform(np.log(eps_range[0]), np.log(eps_range[1])))
+                    eps_l = 0.0 if np.random.uniform(0, 1) < no_eps_rate else np.exp(np.random.uniform(np.log(eps_range[0]), np.log(eps_range[1])))
                 else:
                     eps_l = eps
-                # 1. Generate matrix X
-                X = generate_matrix(d, max_block_size, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
+                X = generate_matrix(d, max_block_size, mode=mode, eps=eps_l, numpy_float32=numpy_float32)
                 matrices.append(X)
                 labels.append(class_idx)
-
-                # 2. Features per power k
-                feat_per_k, mask = per_power_features(X) # (d-1, d*d)
-                features_list.append(feat_per_k)   # (d-1, d+2)
-                masks_list.append(mask)            # (d-1,)
-
-                # 3. Target distribution (KL target) - compute on CPU only
-                y = max_block_size  # pass as int
-                dists_list.append(soft_target(y, eps_l, d, device_target="cpu"))
+                feat_per_k, mask = per_power_features(X)
+                features_list.append(feat_per_k)
+                masks_list.append(mask)
+                dists_list.append(soft_target(max_block_size, eps_l, d, device_target="cpu"))
             print("Done.")
 
         # Convert everything to torch tensors (keep on CPU during generation, only move at end if needed)
@@ -293,25 +255,24 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
             dists = dists.to(device)
 
         dataset[d] = (matrices, true_labels, features, masks, dists)
-
     return dataset
 
 
 def train_jordan_net(
     model,
     training_dataset,
-    num_epochs=50,
+    num_epochs=100,
     batch_size=64,
-    lr=1e-3,
+    lr=1e-4,
     device="cuda",
     patience=3,
     train_transformer=True,
 ):
-    """
-    Training loop for JordanNet using custom jordan_loss with validation and early stopping
-    """
     training_dimensions = list(training_dataset.keys())
     filename = f"sandbox/model_jordan8{'_modified' if not train_transformer else ''}.pth"
+    history_filename = f"sandbox/history_jordan8{'_modified' if not train_transformer else ''}.csv"
+    with open(history_filename, 'w') as f:
+        f.write("epoch, train_loss, val_loss, lr")
 
     if not set(training_dimensions).issubset(model.supported_dimensions):
         raise ValueError(
@@ -320,16 +281,11 @@ def train_jordan_net(
             f"Training dimensions: {training_dimensions}"
         )
 
-    train_datasets = {}
-    val_datasets = {}
     train_loaders = {}
     val_loaders = {}
 
     for d in training_dimensions:
-        # Get the dataset for this dimension
         matrices, true_labels, features, masks, target_dist = training_dataset[d]
-
-        # Split train/validation (80/20)
         n_samples = features.size(0)
         idx = torch.randperm(n_samples)
         train_idx = idx[: int(0.8 * n_samples)]
@@ -364,7 +320,8 @@ def train_jordan_net(
         parameters.extend(list(model.encoders[str(dim)].parameters()))
         parameters.extend(list(model.classifiers[str(dim)].parameters()))
 
-    optimizer = torch.optim.Adam(parameters, lr=lr)
+    optimizer = torch.optim.AdamW(parameters, lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=4)
 
     best_val_loss = float("inf")
     epochs_no_improve = 0
@@ -412,14 +369,18 @@ def train_jordan_net(
                     val_loss += loss.item() * batch_features.size(0)
             val_loss /= sum(len(val_loaders[d].dataset) for d in training_dimensions)
 
+        scheduler.step(val_loss)
         print(
             f"Epoch [{epoch+1}/{num_epochs}] | "
             f"Train Loss: {train_loss:.6f} | "
-            f"Val Loss: {val_loss:.6f}"
+            f"Val Loss: {val_loss:.6f} | "
+            f"LR: {optimizer.param_groups[0]['lr']:.2e}"
         )
+        with open(history_filename, '+a') as f:
+            f.write(f"\n{epoch+1}, {train_loss:.6f}, {val_loss:.6f}, {optimizer.param_groups[0]['lr']:.2e}")
 
         # ===== EARLY STOPPING =====
-        if True: #epoch > 4:
+        if True:
             if val_loss < best_val_loss - 1e-6:  # small tolerance
                 best_val_loss = val_loss
                 epochs_no_improve = 0
