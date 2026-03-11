@@ -228,7 +228,7 @@ def per_power_features(X):
     N_k = X.copy()
     r = np.linalg.matrix_rank(X)
     mask = np.ones(d - 1, dtype=bool)
-    mask[:r+1] = 0.0 # TODO: Probably a mistake: it should be r+1. 
+    mask[:r+1] = 0.0
     if np.all(mask):
         mask[0] = 0.0  # Ensure at least one valid power
 
@@ -306,12 +306,16 @@ def train_jordan_net(
     device="cuda",
     patience=3,
     train_transformer=True,
+    history_filename=None,
 ):
     """
     Training loop for JordanNet using custom jordan_loss with validation and early stopping
     """
     training_dimensions = list(training_dataset.keys())
     filename = f"sandbox/model_jordan8{'_modified' if not train_transformer else ''}.pth"
+    if history_filename is not None:
+        with open(history_filename, 'w') as f:
+            f.write("epoch, train_loss, val_loss, lr")
 
     if not set(training_dimensions).issubset(model.supported_dimensions):
         raise ValueError(
@@ -365,6 +369,7 @@ def train_jordan_net(
         parameters.extend(list(model.classifiers[str(dim)].parameters()))
 
     optimizer = torch.optim.Adam(parameters, lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     best_val_loss = float("inf")
     epochs_no_improve = 0
@@ -411,12 +416,18 @@ def train_jordan_net(
 
                     val_loss += loss.item() * batch_features.size(0)
             val_loss /= sum(len(val_loaders[d].dataset) for d in training_dimensions)
+        
+        scheduler.step()
 
         print(
             f"Epoch [{epoch+1}/{num_epochs}] | "
             f"Train Loss: {train_loss:.6f} | "
-            f"Val Loss: {val_loss:.6f}"
+            f"Val Loss: {val_loss:.6f} | "
+            f"LR: {optimizer.param_groups[0]['lr']:.2e}"
         )
+        if history_filename is not None:
+            with open(history_filename, 'a') as f:
+                f.write(f"\n{epoch}, {train_loss}, {val_loss}, {optimizer.param_groups[0]['lr']:.2e}")
 
         # ===== EARLY STOPPING =====
         if True: #epoch > 4:
