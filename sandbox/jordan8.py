@@ -307,12 +307,13 @@ def train_jordan_net(
     patience=3,
     train_transformer=True,
     history_filename=None,
+    pth_suffix='',
 ):
     """
     Training loop for JordanNet using custom jordan_loss with validation and early stopping
     """
     training_dimensions = list(training_dataset.keys())
-    filename = f"sandbox/model_jordan8{'_modified' if not train_transformer else ''}.pth"
+    filename = f"sandbox/model_jordan8{pth_suffix}{'_modified' if not train_transformer else ''}.pth"
     if history_filename is not None:
         with open(history_filename, 'w') as f:
             f.write("epoch, train_loss, val_loss, lr")
