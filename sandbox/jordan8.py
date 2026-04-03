@@ -98,8 +98,8 @@ class JordanTransformer(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers, enable_nested_tensor=False)
 
-    def forward(self, Z, masks=None):
-        return self.encoder(Z, src_key_padding_mask=masks.bool() if masks is not None else None)
+    def forward(self, Z):
+        return self.encoder(Z)
     
 
 class JordanNet(nn.Module):
@@ -120,12 +120,10 @@ class JordanNet(nn.Module):
         self.encoders[str(d)] = MatrixEncoder(d, out_dim=self.encode_dim)
         self.classifiers[str(d)] = JordanClassifier(num_classes=d, in_dim=self.encode_dim)
 
-    def forward(self, d, features, masks=None):
+    def forward(self, d, features):
         # features: (B, d-1, d*d)
         Z = self.encoders[str(d)](features)        # (B, d-1, 32)
-        Z = self.transformer(Z, masks=masks)    # (B, d-1, 32)
-        if masks is not None:
-            Z = Z.masked_fill(masks.unsqueeze(-1), 0.0)
+        Z = self.transformer(Z)    # (B, d-1, 32)
         h = Z.mean(dim=1)               # (B, 32)
 
         logits = self.classifiers[str(d)](h)      # raw scores
@@ -226,17 +224,12 @@ def per_power_features(X):
 
     feat_per_k = []
     N_k = X.copy()
-    r = np.linalg.matrix_rank(X)
-    mask = np.ones(d - 1, dtype=bool)
-    mask[:r+1] = 0.0
-    if np.all(mask):
-        mask[0] = 0.0  # Ensure at least one valid power
 
     for k in range(1, d):
         feat_per_k.append(N_k.flatten())
         N_k = N_k @ X  # Next power
     
-    return np.stack(feat_per_k), mask  # (d-1, d*d), (d-1,)
+    return np.stack(feat_per_k)   # (d-1, d*d), (d-1,)
 
 
 def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, 1e-2), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False):
@@ -246,7 +239,6 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
         matrices = []
         labels = []
         features_list = []
-        masks_list = []
         dists_list = []
 
         for max_block_size in range(1, d+1):
@@ -267,9 +259,8 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
                 labels.append(class_idx)
 
                 # 2. Features per power k
-                feat_per_k, mask = per_power_features(X) # (d-1, d*d)
+                feat_per_k = per_power_features(X) # (d-1, d*d)
                 features_list.append(feat_per_k)   # (d-1, d+2)
-                masks_list.append(mask)            # (d-1,)
 
                 # 3. Target distribution (KL target) - compute on CPU only
                 y = max_block_size  # pass as int
@@ -280,7 +271,6 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
         matrices = torch.tensor(np.stack(matrices), dtype=torch.float32, device="cpu")
         true_labels = torch.tensor(labels, dtype=torch.long, device="cpu")
         features = torch.tensor(np.stack(features_list), dtype=torch.float32, device="cpu")
-        masks = torch.tensor(np.stack(masks_list), dtype=torch.float32, device="cpu")
         # dists_list contains CPU tensors from `soft_target`
         dists = torch.stack(dists_list)
 
@@ -289,10 +279,9 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
             matrices = matrices.to(device)
             true_labels = true_labels.to(device)
             features = features.to(device)
-            masks = masks.to(device)
             dists = dists.to(device)
 
-        dataset[d] = (matrices, true_labels, features, masks, dists)
+        dataset[d] = (matrices, true_labels, features, dists)
 
     return dataset
 
@@ -332,7 +321,7 @@ def train_jordan_net(
 
     for d in training_dimensions:
         # Get the dataset for this dimension
-        matrices, true_labels, features, masks, target_dist = training_dataset[d]
+        matrices, true_labels, features, target_dist = training_dataset[d]
 
         # Split train/validation (80/20)
         n_samples = features.size(0)
@@ -341,11 +330,10 @@ def train_jordan_net(
         val_idx = idx[int(0.8 * n_samples) :]
 
         X_train, X_val = features[train_idx], features[val_idx]
-        masks_train, masks_val = masks[train_idx], masks[val_idx]
         dist_train, dist_val = target_dist[train_idx], target_dist[val_idx]
 
-        train_dataset = TensorDataset(X_train, masks_train, dist_train)
-        val_dataset = TensorDataset(X_val, masks_val, dist_val)
+        train_dataset = TensorDataset(X_train, dist_train)
+        val_dataset = TensorDataset(X_val, dist_val)
 
         train_loaders[d] = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loaders[d] = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -381,13 +369,12 @@ def train_jordan_net(
         model.train()
         train_loss = 0.0
         for d in training_dimensions:
-            for batch_features, batch_masks, batch_dist in train_loaders[d]:
+            for batch_features, batch_dist in train_loaders[d]:
                 batch_features = batch_features.to(device)
-                batch_masks = batch_masks.to(device)
                 batch_dist = batch_dist.to(device)
 
                 optimizer.zero_grad()
-                logits = model(d, batch_features, batch_masks)
+                logits = model(d, batch_features)
                 # logits = model(batch_features, None)
                 loss = kl_loss(logits, batch_dist)
 
@@ -406,12 +393,11 @@ def train_jordan_net(
         val_loss = 0.0
         with torch.no_grad():
             for d in training_dimensions:
-                for batch_features, batch_masks, batch_dist in val_loaders[d]:
+                for batch_features, batch_dist in val_loaders[d]:
                     batch_features = batch_features.to(device)
-                    batch_masks = batch_masks.to(device)
                     batch_dist = batch_dist.to(device)
 
-                    logits = model(d, batch_features, batch_masks)
+                    logits = model(d, batch_features)
                     # logits = model(batch_features, None)
                     loss = kl_loss(logits, batch_dist)
 
