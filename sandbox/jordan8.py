@@ -98,8 +98,23 @@ class JordanTransformer(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers, enable_nested_tensor=False)
 
-    def forward(self, Z):
-        return self.encoder(Z)
+    def forward(self, Z, return_attention=False):
+        if not return_attention:
+            return self.encoder(Z)
+        
+        # Manual forward pass to extract attention weights
+        all_attentions = []
+        x = Z
+        for layer in self.encoder.layers:
+            # 1. Extract attention weights from this layer
+            # need_weights=True returns weights averaged across all heads by default
+            _, attn_weights = layer.self_attn(x, x, x, need_weights=True)
+            all_attentions.append(attn_weights)
+            
+            # 2. Pass through the rest of the layer normally to keep math identical
+            x = layer(x)
+            
+        return x, all_attentions
     
 
 class JordanNet(nn.Module):
@@ -120,15 +135,21 @@ class JordanNet(nn.Module):
         self.encoders[str(d)] = MatrixEncoder(d, out_dim=self.encode_dim)
         self.classifiers[str(d)] = JordanClassifier(num_classes=d, in_dim=self.encode_dim)
 
-    def forward(self, d, features):
+    def forward(self, d, features, return_attention=False):
         # features: (B, d-1, d*d)
-        Z = self.encoders[str(d)](features)        # (B, d-1, 32)
-        Z = self.transformer(Z)    # (B, d-1, 32)
-        h = Z.mean(dim=1)               # (B, 32)
+        Z_e = self.encoders[str(d)](features)  # (B, d-1, 32)
+        
+        if return_attention:
+            Z, attn_weights = self.transformer(Z_e, return_attention=True)
+        else:
+            Z = self.transformer(Z_e)
+            
+        h = Z.mean(dim=1)  # Mean pooling across the sequence (d-1)
+        logits = self.classifiers[str(d)](h)
 
-        logits = self.classifiers[str(d)](h)      # raw scores
-
-        return logits 
+        if return_attention:
+            return logits, attn_weights, Z_e
+        return logits
 
 def kl_loss(logits, target_dist):
     """
