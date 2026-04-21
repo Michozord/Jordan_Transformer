@@ -133,7 +133,7 @@ class JordanNet(nn.Module):
             raise ValueError(f"Dimension {d} is already supported.")
         self.supported_dimensions.add(d)
         self.encoders[str(d)] = MatrixEncoder(d, out_dim=self.encode_dim)
-        self.classifiers[str(d)] = JordanClassifier(num_classes=d, in_dim=self.encode_dim)
+        self.classifiers[str(d)] = JordanClassifier(num_classes=d-1, in_dim=self.encode_dim)
 
     def forward(self, d, features, return_attention=False):
         # features: (B, d-1, d*d)
@@ -170,14 +170,14 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
     y = y.float().view(1)   # shape (1,)
 
     # class grid
-    k = torch.arange(1, d+1, device=device_target, dtype=torch.float32)  # (d,)
+    k = torch.arange(2, d+1, device=device_target, dtype=torch.float32)  # (d-1,)
 
     # eps == 0 → one-hot
     if float(eps) <= eps0:
-        idx = (y.long() - 1).clamp(min=0, max=d-1)  # (1,)
-        out = torch.zeros(d, device=device_target)
+        idx = (y.long() - 2).clamp(min=0, max=d-2)  # (1,)
+        out = torch.zeros(d-1, device=device_target)
         out[idx] = 1.0
-        return out  # (d,)
+        return out  # (d-1,)
 
     # temperature
     tau = c * torch.log1p(
@@ -186,8 +186,8 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
     )
 
     # Gaussian kernel over class index
-    logits = -(k - y)**2 / (2 * tau**2)   # (d,)
-    return torch.softmax(logits, dim=-1)  # (d,)
+    logits = -(k - y)**2 / (2 * tau**2)   # (d-1,)
+    return torch.softmax(logits, dim=-1)  # (d-1,)
 
 
 
@@ -199,7 +199,7 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     J = np.diag(super_diag, k=1).astype(dtype)
     
     if eps is not None:
-        J = J + (eps * np.random.randn(d, d)).astype(dtype)
+        J = J + (eps * np.random.randn(d, d)/np.sqrt(d)).astype(dtype)
 
     if value_range is None:
         match mode:
@@ -253,7 +253,7 @@ def per_power_features(X):
     return np.stack(feat_per_k)   # (d-1, d*d), (d-1,)
 
 
-def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, 1e-2), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False):
+def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, 1e-1), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False):
     dataset = {}
 
     for d in dimensions:
@@ -262,9 +262,9 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
         features_list = []
         dists_list = []
 
-        for max_block_size in range(1, d+1):
+        for max_block_size in range(2, d+1):
             print(f"Generating class with d={d}, max_block_size={max_block_size}...", end="", flush=True)
-            class_idx = max_block_size - 1
+            class_idx = max_block_size - 2
 
             for _ in range(matrices_per_class):
                 if eps is None:
@@ -275,7 +275,9 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
                 else:
                     eps_l = eps
                 # 1. Generate matrix X
-                X = generate_matrix(d, max_block_size, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
+                # Class "2" contains additionaly matrices generated from diagonal ones
+                bs = random.choice([1, 2]) if max_block_size == 2 else max_block_size
+                X = generate_matrix(d, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
                 matrices.append(X)
                 labels.append(class_idx)
 
