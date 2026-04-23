@@ -125,6 +125,7 @@ class JordanNet(nn.Module):
         self.supported_dimensions = set()
 
         self.encoders = nn.ModuleDict()
+        self.norm = nn.LayerNorm(encode_dim)
         self.classifiers = nn.ModuleDict()
         self.transformer = JordanTransformer(encode_dim, num_layers=2, num_heads=num_heads)
 
@@ -138,11 +139,12 @@ class JordanNet(nn.Module):
     def forward(self, d, features, return_attention=False):
         # features: (B, d-1, d*d)
         Z_e = self.encoders[str(d)](features)  # (B, d-1, 32)
+        Z = self.norm(Z_e)
         
         if return_attention:
-            Z, attn_weights = self.transformer(Z_e, return_attention=True)
+            Z, attn_weights = self.transformer(Z, return_attention=True)
         else:
-            Z = self.transformer(Z_e)
+            Z = self.transformer(Z)
             
         h = Z.mean(dim=1)  # Mean pooling across the sequence (d-1)
         logits = self.classifiers[str(d)](h)
@@ -191,7 +193,7 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
 
 
 
-def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None, return_J=False, numpy_float32=False):
+def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None, return_J=False, numpy_float32=False, normalize=False):
     # dtype selection
     dtype = np.float32 if numpy_float32 else np.float64
 
@@ -199,7 +201,12 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     J = np.diag(super_diag, k=1).astype(dtype)
     
     if eps is not None:
-        J = J + (eps * np.random.randn(d, d)/np.sqrt(d)).astype(dtype)
+        E = np.random.randn(d, d)/np.sqrt(d)
+        if normalize:
+            spectral_radius = np.max(np.abs(np.linalg.eigvals(E)))
+            if spectral_radius > 1:
+                E /= spectral_radius
+        J = J + (eps * E).astype(dtype)
 
     if value_range is None:
         match mode:
@@ -253,13 +260,12 @@ def per_power_features(X):
     return np.stack(feat_per_k)   # (d-1, d*d), (d-1,)
 
 
-def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, 1e-1), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False):
+def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, .1), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False, normalize=False):
     dataset = {}
 
     for d in dimensions:
         matrices = []
         labels = []
-        features_list = []
         dists_list = []
 
         for max_block_size in range(2, d+1):
@@ -277,21 +283,21 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
                 # 1. Generate matrix X
                 # Class "2" contains additionaly matrices generated from diagonal ones
                 bs = random.choice([1, 2]) if max_block_size == 2 else max_block_size
-                X = generate_matrix(d, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
+                X = generate_matrix(d, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32, normalize=normalize)  # (d, d)
                 matrices.append(X)
                 labels.append(class_idx)
 
-                # 2. Features per power k
-                feat_per_k = per_power_features(X) # (d-1, d*d)
-                features_list.append(feat_per_k)   # (d-1, d+2)
-
-                # 3. Target distribution (KL target) - compute on CPU only
+                # 2. Target distribution (KL target) - compute on CPU only
                 y = max_block_size  # pass as int
                 dists_list.append(soft_target(y, eps_l, d, device_target="cpu"))
             print("Done.")
+        
+        matrices_stack = np.stack(matrices)
+        del matrices
+        features_list = [per_power_features(X) for X in matrices_stack]        
 
         # Convert everything to torch tensors (keep on CPU during generation, only move at end if needed)
-        matrices = torch.tensor(np.stack(matrices), dtype=torch.float32, device="cpu")
+        matrices = torch.tensor(matrices_stack, dtype=torch.float32, device="cpu")
         true_labels = torch.tensor(labels, dtype=torch.long, device="cpu")
         features = torch.tensor(np.stack(features_list), dtype=torch.float32, device="cpu")
         # dists_list contains CPU tensors from `soft_target`
