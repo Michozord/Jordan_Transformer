@@ -134,7 +134,7 @@ class JordanNet(nn.Module):
             raise ValueError(f"Dimension {d} is already supported.")
         self.supported_dimensions.add(d)
         self.encoders[str(d)] = MatrixEncoder(d, out_dim=self.encode_dim)
-        self.classifiers[str(d)] = JordanClassifier(num_classes=d-1, in_dim=self.encode_dim)
+        self.classifiers[str(d)] = JordanClassifier(num_classes=d, in_dim=self.encode_dim)
 
     def forward(self, d, features, return_attention=False):
         # features: (B, d-1, d*d)
@@ -172,12 +172,12 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
     y = y.float().view(1)   # shape (1,)
 
     # class grid
-    k = torch.arange(2, d+1, device=device_target, dtype=torch.float32)  # (d-1,)
+    k = torch.arange(1, d+1, device=device_target, dtype=torch.float32)  # (d-1,)
 
     # eps == 0 → one-hot
     if float(eps) <= eps0:
-        idx = (y.long() - 2).clamp(min=0, max=d-2)  # (1,)
-        out = torch.zeros(d-1, device=device_target)
+        idx = (y.long() - 1).clamp(min=0, max=d-1)  # (1,)
+        out = torch.zeros(d, device=device_target)
         out[idx] = 1.0
         return out  # (d-1,)
 
@@ -193,7 +193,7 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
 
 
 
-def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None, return_J=False, numpy_float32=False, normalize=False):
+def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None, return_J=False, numpy_float32=False):
     # dtype selection
     dtype = np.float32 if numpy_float32 else np.float64
 
@@ -202,10 +202,6 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     
     if eps is not None:
         E = np.random.randn(d, d)/np.sqrt(d)
-        if normalize:
-            spectral_radius = np.max(np.abs(np.linalg.eigvals(E)))
-            if spectral_radius > 1:
-                E /= spectral_radius
         J = J + (eps * E).astype(dtype)
 
     if value_range is None:
@@ -244,7 +240,7 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     J = J.astype(dtype)
     X = S @ J @ np.linalg.inv(S.astype(dtype))
         
-    return X
+    return X, np.max(np.abs(np.linalg.eigvals(J)))
 
 
 def per_power_features(X):
@@ -253,14 +249,14 @@ def per_power_features(X):
     feat_per_k = []
     N_k = X.copy()
 
-    for k in range(1, d):
+    for k in range(1, d+1):
         feat_per_k.append(N_k.flatten())
         N_k = N_k @ X  # Next power
     
     return np.stack(feat_per_k)   # (d-1, d*d), (d-1,)
 
 
-def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, .1), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False, normalize=False):
+def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, 1.), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False, normalize=False):
     dataset = {}
 
     for d in dimensions:
@@ -268,9 +264,9 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
         labels = []
         dists_list = []
 
-        for max_block_size in range(2, d+1):
+        for max_block_size in range(1, d+1):
             print(f"Generating class with d={d}, max_block_size={max_block_size}...", end="", flush=True)
-            class_idx = max_block_size - 2
+            class_idx = max_block_size - 1
 
             for _ in range(matrices_per_class):
                 if eps is None:
@@ -282,8 +278,13 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
                     eps_l = eps
                 # 1. Generate matrix X
                 # Class "2" contains additionaly matrices generated from diagonal ones
-                bs = random.choice([1, 2]) if max_block_size == 2 else max_block_size
-                X = generate_matrix(d, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32, normalize=normalize)  # (d, d)
+                # bs = random.choice([1, 2]) if max_block_size == 2 else max_block_size
+                bs = max_block_size
+                X, rad = generate_matrix(d, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
+                if normalize:
+                    if rad > 1:
+                        X /= rad
+                        eps_l /= rad
                 matrices.append(X)
                 labels.append(class_idx)
 
