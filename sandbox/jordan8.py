@@ -201,11 +201,9 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     J = np.diag(super_diag, k=1).astype(dtype)
     
     if eps is not None:
-        E = np.random.randn(d, d)/np.sqrt(d) * eps
-        E_norm = np.linalg.norm(E, ord=2)
-        J = J + E.astype(dtype)
-    else:
-        E_norm = 0.
+        E = np.random.randn(d, d)/np.sqrt(d) 
+        E /= np.linalg.norm(E, ord=2) 
+        J = J + E.astype(dtype)*eps
 
     if value_range is None:
         match mode:
@@ -243,7 +241,7 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     J = J.astype(dtype)
     X = S @ J @ np.linalg.inv(S.astype(dtype))
         
-    return X, np.max(np.abs(np.linalg.eigvals(J))), E_norm, np.linalg.cond(S)
+    return X, np.max(np.abs(np.linalg.eigvals(J))), np.linalg.cond(S)
 
 
 def per_power_features(X):
@@ -367,7 +365,7 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
                 # Class "2" contains additionaly matrices generated from diagonal ones
                 # bs = random.choice([1, 2]) if max_block_size == 2 else max_block_size
                 bs = max_block_size
-                X, rad, E_norm, _ = generate_matrix(d, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
+                X, rad, _ = generate_matrix(d, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
                 if normalize:
                     if rad > 1:
                         X /= rad
@@ -433,12 +431,11 @@ def generate_test_datasets(matrices_per_class, d, mode="random", eps_range=(1e-1
             # Class "2" contains additionaly matrices generated from diagonal ones
             # bs = random.choice([1, 2]) if max_block_size == 2 else max_block_size
             bs = max_block_size
-            X, rad, E_norm, cond_S = generate_matrix(d2, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
+            X, rad, cond_S = generate_matrix(d2, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
             if normalize:
                 if rad > 1:
                     X /= rad
                     eps_l /= rad
-                    E_norm /= rad
                     rad = 1
             if d1 > d2:
                 M = np.zeros((d1,d1)) 
@@ -452,7 +449,7 @@ def generate_test_datasets(matrices_per_class, d, mode="random", eps_range=(1e-1
                 y = max_block_size  # pass as int
                 dists_list.append(soft_target(y, eps_l, d1, device_target="cpu"))
                 S_conds.append(cond_S)
-                E_norms.append(E_norm)
+                E_norms.append(eps_l)
                 rads.append(rad)
                 i+= 1
 
