@@ -1,9 +1,0 @@
-macierze 5x5, early stopping od 10 epoki
-zbiór treningowy po 50 000 macierzy z każdego rodzaju, 
-zbiór testowy po 1000 macierzy z każdego rodzaju
-Adam lr = 1e-3
-7 hidden layers, każda po 256 neuronów + ReLU wszędzie  
-
-kategoria: 
-oznacza liczbę 1 nad przekątną w bloku Jordana. Nad przekątną mogą być tylko rzeczy typu [1, 1, 1, 1], [1, 1, 1, 0], [1, 1, 0, 0] [1, 0, 0, 0] lub [0, 0, 0, 0]
-
