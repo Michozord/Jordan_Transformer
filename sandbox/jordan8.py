@@ -125,6 +125,7 @@ class JordanNet(nn.Module):
         self.supported_dimensions = set()
 
         self.encoders = nn.ModuleDict()
+        self.norm = nn.LayerNorm(encode_dim)
         self.classifiers = nn.ModuleDict()
         self.transformer = JordanTransformer(encode_dim, num_layers=2, num_heads=num_heads)
 
@@ -138,11 +139,12 @@ class JordanNet(nn.Module):
     def forward(self, d, features, return_attention=False):
         # features: (B, d-1, d*d)
         Z_e = self.encoders[str(d)](features)  # (B, d-1, 32)
+        Z = self.norm(Z_e)
         
         if return_attention:
-            Z, attn_weights = self.transformer(Z_e, return_attention=True)
+            Z, attn_weights = self.transformer(Z, return_attention=True)
         else:
-            Z = self.transformer(Z_e)
+            Z = self.transformer(Z)
             
         h = Z.mean(dim=1)  # Mean pooling across the sequence (d-1)
         logits = self.classifiers[str(d)](h)
@@ -151,14 +153,14 @@ class JordanNet(nn.Module):
             return logits, attn_weights, Z_e
         return logits
 
-def kl_loss(logits, target_dist):
+def kl_loss(logits, target_dist, reduction="batchmean"):
     """
     logits: (B, C)
     target_dist: (B, C), sums to 1
     """
     log_probs = torch.log_softmax(logits, dim=-1)
     return torch.nn.functional.kl_div(
-        log_probs, target_dist, reduction="batchmean"
+        log_probs, target_dist, reduction=reduction
     )
 
 def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
@@ -170,14 +172,14 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
     y = y.float().view(1)   # shape (1,)
 
     # class grid
-    k = torch.arange(1, d+1, device=device_target, dtype=torch.float32)  # (d,)
+    k = torch.arange(1, d+1, device=device_target, dtype=torch.float32)  # (d-1,)
 
     # eps == 0 → one-hot
     if float(eps) <= eps0:
         idx = (y.long() - 1).clamp(min=0, max=d-1)  # (1,)
         out = torch.zeros(d, device=device_target)
         out[idx] = 1.0
-        return out  # (d,)
+        return out  # (d-1,)
 
     # temperature
     tau = c * torch.log1p(
@@ -186,8 +188,8 @@ def soft_target(y, eps, d, c=0.1, eps0=1e-8, device_target="cpu"):
     )
 
     # Gaussian kernel over class index
-    logits = -(k - y)**2 / (2 * tau**2)   # (d,)
-    return torch.softmax(logits, dim=-1)  # (d,)
+    logits = -(k - y)**2 / (2 * tau**2)   # (d-1,)
+    return torch.softmax(logits, dim=-1)  # (d-1,)
 
 
 
@@ -199,7 +201,9 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     J = np.diag(super_diag, k=1).astype(dtype)
     
     if eps is not None:
-        J = J + (eps * np.random.randn(d, d)).astype(dtype)
+        E = np.random.randn(d, d)/np.sqrt(d) 
+        E /= np.linalg.norm(E, ord=2) 
+        J = J + E.astype(dtype)*eps
 
     if value_range is None:
         match mode:
@@ -225,7 +229,7 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
                     A = np.random.randn(d, d).astype(dtype)
                     Q, _ = np.linalg.qr(A)
                     S = Q.astype(dtype)
-            if abs(np.linalg.cond(S)) < 1e5:
+            if abs(np.linalg.cond(S)) < 200*d:
                 return S
 
     S = generate_S()
@@ -237,36 +241,119 @@ def generate_matrix(d, max_block_size, mode='random', eps=None, value_range=None
     J = J.astype(dtype)
     X = S @ J @ np.linalg.inv(S.astype(dtype))
         
-    return X
+    return X, np.max(np.abs(np.linalg.eigvals(J))), np.linalg.cond(S)
 
 
 def per_power_features(X):
     d = X.shape[0]
-
-    feat_per_k = []
-    N_k = X.copy()
-
-    for k in range(1, d):
-        feat_per_k.append(N_k.flatten())
-        N_k = N_k @ X  # Next power
     
-    return np.stack(feat_per_k)   # (d-1, d*d), (d-1,)
+    # Perform Schur decomposition: X = Z * T * Z^H
+    # T is upper quasi-triangular, Z is unitary
+    T, Z = scipy.linalg.schur(X)
+    
+    feat_per_k = []
+    T_k = T.copy() # Start with T^1
+    
+    for k in range(1, d + 1):
+        feat_per_k.append(T_k)
+        
+        # Increment the power of the triangular matrix
+        if k < d:
+            T_k = T_k @ T
+            
+    return np.stack(feat_per_k)
+
+import numpy as np
 
 
-def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, 1e-2), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False):
+def check_doubling_consistency(P, verbose=False):
+    """
+    Check the doubling consistency relation
+
+        A^(2k) ?= (A^k)^2
+
+    for numerically computed matrix powers.
+
+    Parameters
+    ----------
+    P : list of ndarray
+        List of computed powers where:
+
+            P[0] = A
+            P[1] = A^2
+            P[2] = A^3
+            ...
+            P[m-1] = A^m
+
+    Returns
+    -------
+    delta : ndarray
+        Relative doubling errors.
+
+    residuals : ndarray
+        Residual norms.
+    """
+
+    m = len(P)
+
+    # Need at least A and A^2
+    maxk = m // 2
+
+    if maxk < 1:
+        raise ValueError("Not enough powers for doubling test.")
+
+    delta = np.zeros(maxk)
+    residuals = np.zeros(maxk)
+    if verbose:
+        print("--------------------------------------------------")
+        print(" k      residual norm        relative error")
+        print("--------------------------------------------------")
+
+    for k in range(1, maxk + 1):
+
+        # P[k-1] approximates A^k
+        Ak = P[k - 1]
+
+        # P[2k-1] approximates A^(2k)
+        A2k = P[2 * k - 1]
+
+        D = A2k - Ak @ Ak
+
+        residuals[k - 1] = np.linalg.norm(D, 2)
+
+        denom = np.linalg.norm(Ak, ord=2) ** 2
+
+        if denom == 0:
+            delta[k - 1] = residuals[k - 1]
+        else:
+            delta[k - 1] = residuals[k - 1] / denom
+        if verbose:
+            print(
+                f"{k:3d}    "
+                f"{residuals[k - 1]:12.4e}    "
+                f"{delta[k - 1]:12.4e}"
+            )
+
+    if verbose:
+        print("--------------------------------------------------")
+
+    return delta, residuals
+
+
+def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random", eps_range=(1e-16, 0.1), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False, normalize=False):
     dataset = {}
 
     for d in dimensions:
-        matrices = []
         labels = []
-        features_list = []
         dists_list = []
+        features_list = []
 
         for max_block_size in range(1, d+1):
             print(f"Generating class with d={d}, max_block_size={max_block_size}...", end="", flush=True)
             class_idx = max_block_size - 1
 
-            for _ in range(matrices_per_class):
+            i = 0
+            while i < matrices_per_class:
                 if eps is None:
                     if np.random.uniform(0, 1) < no_eps_rate:
                         eps_l = 0.0
@@ -275,21 +362,27 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
                 else:
                     eps_l = eps
                 # 1. Generate matrix X
-                X = generate_matrix(d, max_block_size, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
-                matrices.append(X)
-                labels.append(class_idx)
+                # Class "2" contains additionaly matrices generated from diagonal ones
+                # bs = random.choice([1, 2]) if max_block_size == 2 else max_block_size
+                bs = max_block_size
+                X, rad, _ = generate_matrix(d, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
+                if normalize:
+                    if rad > 1:
+                        X /= rad
+                        eps_l /= rad
+                
+                powers = per_power_features(X)
+                if np.max(check_doubling_consistency(powers)[0]) <= 1e-12:
+                    labels.append(class_idx)
+                    features_list.append(powers.reshape(d, d*d))
+                    # 2. Target distribution (KL target) - compute on CPU only
+                    y = max_block_size  # pass as int
+                    dists_list.append(soft_target(y, eps_l, d, device_target="cpu"))
+                    i+= 1
 
-                # 2. Features per power k
-                feat_per_k = per_power_features(X) # (d-1, d*d)
-                features_list.append(feat_per_k)   # (d-1, d+2)
-
-                # 3. Target distribution (KL target) - compute on CPU only
-                y = max_block_size  # pass as int
-                dists_list.append(soft_target(y, eps_l, d, device_target="cpu"))
             print("Done.")
-
+        
         # Convert everything to torch tensors (keep on CPU during generation, only move at end if needed)
-        matrices = torch.tensor(np.stack(matrices), dtype=torch.float32, device="cpu")
         true_labels = torch.tensor(labels, dtype=torch.long, device="cpu")
         features = torch.tensor(np.stack(features_list), dtype=torch.float32, device="cpu")
         # dists_list contains CPU tensors from `soft_target`
@@ -297,14 +390,87 @@ def generate_training_datasets(matrices_per_class, dimensions=[5], mode="random"
 
         # Move to target device only at the very end
         if device != "cpu":
-            matrices = matrices.to(device)
             true_labels = true_labels.to(device)
             features = features.to(device)
             dists = dists.to(device)
 
-        dataset[d] = (matrices, true_labels, features, dists)
+        dataset[d] = (true_labels, features, dists)
 
     return dataset
+
+
+def generate_test_datasets(matrices_per_class, d, mode="random", eps_range=(1e-16, 0.1), eps=None, no_eps_rate=0.1, device="cpu", numpy_float32=False, normalize=False):
+
+    features_list = []
+    labels = []
+    dists_list = []
+    E_norms = []
+    S_conds = []
+    rads = []
+
+    if isinstance(d, tuple):
+        d2, d1 = d
+    else:
+        d2 = d
+        d1 = d
+
+    for max_block_size in range(1, d2+1):
+        print(f"Generating class with d={d2}, max_block_size={max_block_size}...", end="", flush=True)
+        class_idx = max_block_size - 1
+
+        i = 0
+        while i < matrices_per_class:
+            if eps is None:
+                if np.random.uniform(0, 1) < no_eps_rate:
+                    eps_l = 0.0
+                else:
+                    eps_l = np.exp(np.random.uniform(np.log(eps_range[0]), np.log(eps_range[1])))
+            else:
+                eps_l = eps
+            # 1. Generate matrix X
+            # Class "2" contains additionaly matrices generated from diagonal ones
+            # bs = random.choice([1, 2]) if max_block_size == 2 else max_block_size
+            bs = max_block_size
+            X, rad, cond_S = generate_matrix(d2, bs, mode=mode, eps=eps_l, numpy_float32=numpy_float32)  # (d, d)
+            if normalize:
+                if rad > 1:
+                    X /= rad
+                    eps_l /= rad
+                    rad = 1
+            if d1 > d2:
+                M = np.zeros((d1,d1)) 
+                M[:d2, :d2] = X
+                X = M
+            powers = per_power_features(X)
+            if np.max(check_doubling_consistency(powers)[0]) <= 1e-12:
+                labels.append(class_idx)
+                features_list.append(powers.reshape(d1, d1*d1))
+                # 2. Target distribution (KL target) - compute on CPU only
+                y = max_block_size  # pass as int
+                dists_list.append(soft_target(y, eps_l, d1, device_target="cpu"))
+                S_conds.append(cond_S)
+                E_norms.append(eps_l)
+                rads.append(rad)
+                i+= 1
+
+        print("Done.")
+
+    # Convert everything to torch tensors (keep on CPU during generation, only move at end if needed)
+    true_labels = torch.tensor(labels, dtype=torch.long, device="cpu")
+    features = torch.tensor(np.stack(features_list), dtype=torch.float32, device="cpu")
+    # dists_list contains CPU tensors from `soft_target`
+    dists = torch.stack(dists_list)
+    E_norms = torch.tensor(E_norms)
+    S_conds = torch.tensor(S_conds)
+    rads = torch.tensor(rads)
+
+    # Move to target device only at the very end
+    if device != "cpu":
+        true_labels = true_labels.to(device)
+        features = features.to(device)
+        dists = dists.to(device)
+
+    return true_labels, features, dists, E_norms, S_conds, rads
 
 
 def train_jordan_net(
@@ -342,7 +508,7 @@ def train_jordan_net(
 
     for d in training_dimensions:
         # Get the dataset for this dimension
-        matrices, true_labels, features, target_dist = training_dataset[d]
+        true_labels, features, target_dist = training_dataset[d]
 
         # Split train/validation (80/20)
         n_samples = features.size(0)
